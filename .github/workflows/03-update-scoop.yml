@@ -1,10 +1,6 @@
 name: 03 更新 Scoop Manifest
 
 on:
-  workflow_run:
-    workflows: ["02 构建发行"]
-    types: [completed]
-
   release:
     types: [published]
 
@@ -28,8 +24,7 @@ jobs:
     runs-on: ubuntu-latest
     if: >-
       github.event_name == 'workflow_dispatch' ||
-      github.event_name == 'release' ||
-      github.event.workflow_run.conclusion == 'success'
+      github.event_name == 'release'
     steps:
       - name: 确定目标版本号
         run: |
@@ -61,28 +56,34 @@ jobs:
         run: |
           TAG="$TARGET_TAG"
           for i in $(seq 1 20); do
-            URL=$(curl -s "https://api.github.com/repos/${{ github.repository }}/releases/tags/$TAG" \
-              | jq -r '.assets[] | select(.name | test("windows.*\\.zip")) | .browser_download_url' \
-              | head -1)
-            if [ -n "$URL" ] && [ "$URL" != "null" ]; then
-              echo "找到产物: $URL"
-              echo "ASSET_URL=$URL" >> $GITHUB_ENV
+            ASSETS_JSON=$(curl -s "https://api.github.com/repos/${{ github.repository }}/releases/tags/$TAG")
+            URL_X64=$(echo "$ASSETS_JSON" | jq -r '.assets[] | select(.name | test("windows-x86_64.*\\.zip")) | .browser_download_url')
+            URL_ARM64=$(echo "$ASSETS_JSON" | jq -r '.assets[] | select(.name | test("windows-aarch64.*\\.zip")) | .browser_download_url')
+            if [ -n "$URL_X64" ] && [ "$URL_X64" != "null" ]; then
+              echo "找到 x64 产物: $URL_X64"
+              echo "ASSET_URL_X64=$URL_X64" >> $GITHUB_ENV
+              [ -n "$URL_ARM64" ] && [ "$URL_ARM64" != "null" ] && echo "ASSET_URL_ARM64=$URL_ARM64" >> $GITHUB_ENV && echo "找到 arm64 产物: $URL_ARM64"
               break
             fi
             echo "[$i/20] 产物未就绪，等待 15s..."
             sleep 15
           done
-          if [ -z "$URL" ] || [ "$URL" = "null" ]; then
-            echo "::error::未找到 Windows 产物"
+          if [ -z "$URL_X64" ] || [ "$URL_X64" = "null" ]; then
+            echo "::error::未找到 Windows x64 产物"
             exit 1
           fi
 
       - name: 下载并计算 Hash
         run: |
-          curl -L -o zed-windows.zip "$ASSET_URL"
-          HASH=$(sha256sum zed-windows.zip | awk '{print $1}')
-          echo "SHA256=$HASH" >> $GITHUB_ENV
-          rm zed-windows.zip
+          curl -L -o zed-win-x64.zip "$ASSET_URL_X64"
+          echo "SHA256_X64=$(sha256sum zed-win-x64.zip | awk '{print $1}')" >> $GITHUB_ENV
+          rm zed-win-x64.zip
+
+          if [ -n "$ASSET_URL_ARM64" ]; then
+            curl -L -o zed-win-arm64.zip "$ASSET_URL_ARM64"
+            echo "SHA256_ARM64=$(sha256sum zed-win-arm64.zip | awk '{print $1}')" >> $GITHUB_ENV
+            rm zed-win-arm64.zip
+          fi
 
       - name: 生成 Manifest
         run: |
@@ -90,20 +91,44 @@ jobs:
           CLEAN_VERSION="${VERSION#v}"
           REPO="${{ github.repository }}"
 
+          ARM64_BLOCK=""
+          ARM64_AUTOUPDATE=""
+          if [ -n "$ASSET_URL_ARM64" ]; then
+            ARM64_BLOCK=$(cat <<ARMBLOCK
+              ,
+                  "arm64": {
+                      "url": "$ASSET_URL_ARM64",
+                      "hash": "$SHA256_ARM64"
+                  }
+          ARMBLOCK
+          )
+            ARM64_AUTOUPDATE=$(cat <<ARMAU
+              ,
+                      "arm64": {
+                          "url": "https://github.com/$REPO/releases/download/v\$version/zedg-zh-cn-windows-aarch64-v\$version.zip",
+                          "hash": {
+                              "url": "https://github.com/$REPO/releases/download/v\$version/sha256sums.txt",
+                              "regex": "([a-f0-9]{64})\\s+zedg-zh-cn-windows-aarch64-v\$version\\.zip"
+                          }
+                      }
+          ARMAU
+          )
+          fi
+
           generate_manifest() {
-            local name="$1"
-            local out="$2"
+            local out="$1"
+            local desc_suffix="${2:+ - $2}"
             cat > "$out" << MANIFEST
           {
               "version": "$CLEAN_VERSION",
-              "description": "Zed Editor (Localized / 汉化版)${3:+ - Preview}",
+              "description": "Zed Editor (Localized / 汉化版)${desc_suffix}",
               "homepage": "https://github.com/$REPO",
               "license": "GPL-3.0-only",
               "architecture": {
                   "64bit": {
-                      "url": "$ASSET_URL",
-                      "hash": "$SHA256"
-                  }
+                      "url": "$ASSET_URL_X64",
+                      "hash": "$SHA256_X64"
+                  }${ARM64_BLOCK}
               },
               "bin": "ZedG.exe",
               "shortcuts": [["ZedG.exe", "ZedG"]],
@@ -113,8 +138,12 @@ jobs:
               "autoupdate": {
                   "architecture": {
                       "64bit": {
-                          "url": "https://github.com/$REPO/releases/download/v\$version/zed-windows.zip"
-                      }
+                          "url": "https://github.com/$REPO/releases/download/v\$version/zedg-zh-cn-windows-x86_64-v\$version.zip",
+                          "hash": {
+                              "url": "https://github.com/$REPO/releases/download/v\$version/sha256sums.txt",
+                              "regex": "([a-f0-9]{64})\\s+zedg-zh-cn-windows-x86_64-v\$version\\.zip"
+                          }
+                      }${ARM64_AUTOUPDATE}
                   }
               }
           }
@@ -123,10 +152,10 @@ jobs:
 
           if [ "$IS_PRERELEASE" = "true" ]; then
             echo "生成预览版 Manifest"
-            generate_manifest "zedg-preview" "zedg-preview.json" "preview"
+            generate_manifest "zedg-preview.json" "Preview"
           else
             echo "生成稳定版 Manifest"
-            generate_manifest "zedg" "zedg.json"
+            generate_manifest "zedg.json"
           fi
 
       - name: 推送 Manifest 到 scoop 分支
