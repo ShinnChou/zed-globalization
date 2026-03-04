@@ -141,6 +141,7 @@ jobs:
           git checkout origin/i18n -- scan_result.json 2>/dev/null || echo '{}' > scan_result.json
           git checkout origin/i18n -- string.json 2>/dev/null || echo '{}' > string.json
           git checkout origin/i18n -- string_context.json 2>/dev/null || echo '{}' > string_context.json
+          # 获取整个 i18n/ 目录（含 tag 子目录和旧版平铺文件）
           git checkout origin/i18n -- i18n/ 2>/dev/null || mkdir -p i18n
 
       - name: 确定参数
@@ -271,18 +272,53 @@ jobs:
           extract_all(abs_files, "string.json", "string_context.json")
           PYEOF
 
+      - name: 准备基础翻译
+        env:
+          VERSION: ${{ steps.params.outputs.VERSION }}
+          TARGET_LANG: ${{ steps.params.outputs.TARGET_LANG }}
+        run: |
+          TRANS_DIR="i18n/${VERSION}"
+          TRANS_FILE="${TRANS_DIR}/${TARGET_LANG}.json"
+          mkdir -p "$TRANS_DIR"
+
+          if [ -f "$TRANS_FILE" ]; then
+            echo "已存在当前版本翻译: $TRANS_FILE"
+          else
+            # 从最近的版本目录获取基础翻译
+            NEAREST=""
+            if ls -d i18n/v*/  >/dev/null 2>&1; then
+              NEAREST=$(ls -d i18n/v*/ | sed 's|i18n/||;s|/||' | sort -V | \
+                awk -v cur="$VERSION" '{
+                  if ($0 < cur) prev=$0
+                } END { if (prev) print prev }')
+            fi
+
+            if [ -n "$NEAREST" ] && [ -f "i18n/${NEAREST}/${TARGET_LANG}.json" ]; then
+              echo "从最近版本 ${NEAREST} 获取基础翻译"
+              cp "i18n/${NEAREST}/${TARGET_LANG}.json" "$TRANS_FILE"
+            elif [ -f "i18n/${TARGET_LANG}.json" ]; then
+              echo "从旧版平铺路径 i18n/${TARGET_LANG}.json 获取基础翻译"
+              cp "i18n/${TARGET_LANG}.json" "$TRANS_FILE"
+            else
+              echo "无基础翻译，从零开始"
+              echo '{}' > "$TRANS_FILE"
+            fi
+          fi
+          echo "翻译文件: $TRANS_FILE ($(wc -c < "$TRANS_FILE") bytes)"
+
       - name: AI 翻译
         env:
           AI_BASE_URL: ${{ secrets.AI_BASE_URL }}
           AI_API_KEY: ${{ secrets.AI_API_KEY }}
           AI_MODEL: ${{ secrets.AI_MODEL }}
           AI_CONCURRENCY: ${{ vars.AI_CONCURRENCY || '10' }}
+          VERSION: ${{ steps.params.outputs.VERSION }}
           TARGET_LANG: ${{ steps.params.outputs.TARGET_LANG }}
           EXTRACT_MODE: ${{ steps.params.outputs.EXTRACT_MODE }}
         run: |
           zedl10n translate \
             --input string.json \
-            --output "i18n/${TARGET_LANG}.json" \
+            --output "i18n/${VERSION}/${TARGET_LANG}.json" \
             --context string_context.json \
             --glossary config/glossary.yaml \
             --source-root zed \
@@ -294,10 +330,11 @@ jobs:
           AI_BASE_URL: ${{ secrets.AI_BASE_URL }}
           AI_API_KEY: ${{ secrets.AI_API_KEY }}
           AI_MODEL: ${{ secrets.AI_MODEL }}
+          VERSION: ${{ steps.params.outputs.VERSION }}
           TARGET_LANG: ${{ steps.params.outputs.TARGET_LANG }}
         run: |
           zedl10n fix-placeholders \
-            --input "i18n/${TARGET_LANG}.json" \
+            --input "i18n/${VERSION}/${TARGET_LANG}.json" \
             --source-root zed
 
       - name: 推送到 i18n 分支

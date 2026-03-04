@@ -136,13 +136,51 @@ jobs:
         run: pip install .
 
       - name: 从 i18n 分支获取翻译文件和禁止翻译列表
+        id: get_trans
         run: |
           git fetch origin i18n
-          git checkout origin/i18n -- "i18n/${TARGET_LANG}.json"
+          # 获取整个 i18n/ 目录用于版本查找
+          git checkout origin/i18n -- i18n/ 2>/dev/null || mkdir -p i18n
           git checkout origin/i18n -- "config/do_not_translate.json"
 
+          # 查找最佳翻译文件：精确版本 → 最近新版 → 最近旧版 → 旧版平铺
+          TRANS=""
+          if [ -f "i18n/${BUILD_VERSION}/${TARGET_LANG}.json" ]; then
+            TRANS="i18n/${BUILD_VERSION}/${TARGET_LANG}.json"
+            echo "使用精确版本翻译: $TRANS"
+          elif ls -d i18n/v*/ >/dev/null 2>&1; then
+            # 先找比当前版本新的最近版本
+            NEWER=$(ls -d i18n/v*/ | sed 's|i18n/||;s|/||' | sort -V | \
+              awk -v cur="$BUILD_VERSION" '$0 > cur { print; exit }')
+            # 再找比当前版本旧的最近版本
+            OLDER=$(ls -d i18n/v*/ | sed 's|i18n/||;s|/||' | sort -V | \
+              awk -v cur="$BUILD_VERSION" '{ if ($0 < cur) prev=$0 } END { if (prev) print prev }')
+
+            if [ -n "$NEWER" ] && [ -f "i18n/${NEWER}/${TARGET_LANG}.json" ]; then
+              TRANS="i18n/${NEWER}/${TARGET_LANG}.json"
+              echo "使用最近新版 ${NEWER} 的翻译: $TRANS"
+            elif [ -n "$OLDER" ] && [ -f "i18n/${OLDER}/${TARGET_LANG}.json" ]; then
+              TRANS="i18n/${OLDER}/${TARGET_LANG}.json"
+              echo "使用最近旧版 ${OLDER} 的翻译: $TRANS"
+            fi
+          fi
+
+          if [ -z "$TRANS" ] && [ -f "i18n/${TARGET_LANG}.json" ]; then
+            TRANS="i18n/${TARGET_LANG}.json"
+            echo "使用旧版平铺翻译: $TRANS"
+          fi
+
+          if [ -z "$TRANS" ]; then
+            TRANS="i18n/${BUILD_VERSION}/${TARGET_LANG}.json"
+            mkdir -p "i18n/${BUILD_VERSION}"
+            echo '{}' > "$TRANS"
+            echo "无可用翻译，使用空文件"
+          fi
+
+          echo "trans_file=$TRANS" >> $GITHUB_OUTPUT
+
       - name: 执行本地化替换
-        run: zedl10n replace --input "i18n/${TARGET_LANG}.json" --source-root zed --do-not-translate config/do_not_translate.json
+        run: zedl10n replace --input "${{ steps.get_trans.outputs.trans_file }}" --source-root zed --do-not-translate config/do_not_translate.json
 
       - name: 应用 Agent 环境变量补丁
         run: python3 patch_agent_env.py --source-root zed
@@ -2103,23 +2141,45 @@ jobs:
         uses: actions/checkout@v4
 
       - name: 从 i18n 分支获取翻译文件
+        id: release_trans
         run: |
           git fetch origin i18n
-          mkdir -p i18n
-          git checkout origin/i18n -- "i18n/${TARGET_LANG}.json" 2>/dev/null \
-            || echo '{}' > "i18n/${TARGET_LANG}.json"
+          git checkout origin/i18n -- i18n/ 2>/dev/null || mkdir -p i18n
+
+          TRANS=""
+          if [ -f "i18n/${BUILD_VERSION}/${TARGET_LANG}.json" ]; then
+            TRANS="i18n/${BUILD_VERSION}/${TARGET_LANG}.json"
+          elif ls -d i18n/v*/ >/dev/null 2>&1; then
+            NEWER=$(ls -d i18n/v*/ | sed 's|i18n/||;s|/||' | sort -V | \
+              awk -v cur="$BUILD_VERSION" '$0 > cur { print; exit }')
+            OLDER=$(ls -d i18n/v*/ | sed 's|i18n/||;s|/||' | sort -V | \
+              awk -v cur="$BUILD_VERSION" '{ if ($0 < cur) prev=$0 } END { if (prev) print prev }')
+            if [ -n "$NEWER" ] && [ -f "i18n/${NEWER}/${TARGET_LANG}.json" ]; then
+              TRANS="i18n/${NEWER}/${TARGET_LANG}.json"
+            elif [ -n "$OLDER" ] && [ -f "i18n/${OLDER}/${TARGET_LANG}.json" ]; then
+              TRANS="i18n/${OLDER}/${TARGET_LANG}.json"
+            fi
+          fi
+          [ -z "$TRANS" ] && [ -f "i18n/${TARGET_LANG}.json" ] && TRANS="i18n/${TARGET_LANG}.json"
+          [ -z "$TRANS" ] && TRANS="" && echo "无翻译文件可用"
+
+          echo "trans_file=${TRANS}" >> $GITHUB_OUTPUT
+          echo "翻译文件: ${TRANS:-无}"
 
       - name: 获取并翻译 Release Notes
         env:
           AI_BASE_URL: ${{ secrets.AI_BASE_URL }}
           AI_API_KEY: ${{ secrets.AI_API_KEY }}
           AI_MODEL: ${{ secrets.AI_MODEL }}
+          TRANS_FILE: ${{ steps.release_trans.outputs.trans_file }}
         run: |
           pip install ".[ai]" -q
+          TRANS_ARG=""
+          [ -n "$TRANS_FILE" ] && TRANS_ARG="--translation-file $TRANS_FILE"
           zedl10n release-notes \
             --version "$BUILD_VERSION" \
             --lang "$TARGET_LANG" \
-            --translation-file "i18n/${TARGET_LANG}.json" \
+            $TRANS_ARG \
             --output /tmp/release_body.md
           echo "--- Release body preview ---"
           head -30 /tmp/release_body.md
