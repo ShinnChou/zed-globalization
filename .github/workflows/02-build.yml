@@ -1383,7 +1383,10 @@ jobs:
           echo "物理内存: 峰值 ${PEAK_MEM}MB / 总计 ${TOTAL_MEM}MB"
           echo "交换内存: 峰值 ${PEAK_SWAP}MB"
           echo "采样记录数: $SAMPLES"
-          exit $BUILD_EXIT
+          [ $BUILD_EXIT -ne 0 ] && exit $BUILD_EXIT
+
+          echo "=== 编译 CLI 辅助二进制 ==="
+          cargo build --release --package cli --target aarch64-apple-darwin --manifest-path "$GITHUB_WORKSPACE/zed/Cargo.toml"
 
       - name: 停止 sccache
         if: env.SCCACHE_AVAILABLE == 'true'
@@ -1615,7 +1618,10 @@ jobs:
           echo "物理内存: 峰值 ${PEAK_MEM}MB / 总计 ${TOTAL_MEM}MB"
           echo "交换内存: 峰值 ${PEAK_SWAP}MB"
           echo "采样记录数: $SAMPLES"
-          exit $BUILD_EXIT
+          [ $BUILD_EXIT -ne 0 ] && exit $BUILD_EXIT
+
+          echo "=== 编译 CLI 辅助二进制 ==="
+          cargo build --release --package cli --target x86_64-apple-darwin --manifest-path "$GITHUB_WORKSPACE/zed/Cargo.toml"
 
       - name: 停止 sccache
         if: env.SCCACHE_AVAILABLE == 'true'
