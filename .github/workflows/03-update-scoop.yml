@@ -10,6 +10,11 @@ on:
         description: "Release 版本号（both 模式时忽略）"
         required: false
         type: string
+      is_prerelease:
+        description: "是否为 Pre-release"
+        required: false
+        default: "false"
+        type: string
       mode:
         description: "更新模式"
         required: false
@@ -37,6 +42,7 @@ jobs:
           EVENT: ${{ github.event_name }}
           INPUT_TAG: ${{ inputs.version_tag }}
           INPUT_MODE: ${{ inputs.mode }}
+          INPUT_IS_PRE: ${{ inputs.is_prerelease }}
           EVENT_TAG: ${{ github.event.release.tag_name }}
           EVENT_IS_PRE: ${{ github.event.release.prerelease }}
           SCOOP_PAT: ${{ secrets.TAP_GITHUB_TOKEN }}
@@ -145,8 +151,12 @@ jobs:
           else
             if [ -z "$TARGET_TAG" ] && [ -n "$INPUT_TAG" ]; then
               TARGET_TAG="$INPUT_TAG"
-              IS_PRE=$(curl -s "https://api.github.com/repos/${GH_REPO}/releases/tags/$TARGET_TAG" \
-                | jq -r '.prerelease // false')
+              if [ -n "$INPUT_IS_PRE" ] && [ "$INPUT_IS_PRE" != "false" ]; then
+                IS_PRE="$INPUT_IS_PRE"
+              else
+                IS_PRE=$(curl -s "https://api.github.com/repos/${GH_REPO}/releases/tags/$TARGET_TAG" \
+                  | jq -r '.prerelease // false')
+              fi
             elif [ -z "$TARGET_TAG" ]; then
               TARGET_TAG=$(curl -s "https://api.github.com/repos/${GH_REPO}/releases/latest" | jq -r .tag_name)
               IS_PRE="false"
